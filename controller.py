@@ -114,7 +114,7 @@ def login(username, password):
             "response": None,
             "status": "Error",
         }
-        return jsonify(response)
+        return response
 
     access_expiry = dt.timedelta(days=1)
     refresh_expiry = dt.timedelta(days=30)
@@ -153,7 +153,7 @@ def login(username, password):
         "status": "Success",
     }
 
-    return jsonify(json.loads(json_util.dumps(response)))
+    return json.loads(json_util.dumps(response))
 
 
 def refresh():
@@ -178,7 +178,7 @@ def refresh():
         "status": "Success",
     }
 
-    return jsonify(json.loads(json_util.dumps(response)))
+    return json.loads(json_util.dumps(response))
 
 
 def get_users():
@@ -191,94 +191,332 @@ def get_users():
             # Generate today's date
             "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         },
-        "response": json.loads(json_util.dumps(users)),
+        "response": users,
         "status": "Success",
     }
-    return jsonify(response)
+    return json.loads(json_util.dumps(response))
+
+
+def get_weapons(options: dict = {}):
+    """Get all weapons from MongoDB."""
+
+    # Check if options matches the schema
+    weapons = client.terra.weapons.find(options)
+    if weapons is None:
+        response = {
+            "meta": {
+                "code": f"{404} Not Found",
+                "status": "No weapons found in database. Ensure params are correct.",
+                "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            },
+            "response": None,
+            "status": "Error",
+        }
+        return response
+
+    response = {
+        "meta": {
+            "code": f"{200} OK",
+            "status": "Successfully retrieved all weapons.",
+            "total": client.terra.weapons.count_documents({}),
+            "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        },
+        "response": weapons,
+        "status": "Success",
+    }
+    return json.loads(json_util.dumps(response))
 
 
 def obtain(user, request):
-    try:
-        if request.json is None or request.json.get("weapon_ids") is None:
-            response = {
-                "meta": {
-                    "code": f"{400} Bad Request",
-                    "status": "Please provide a payload of IDs.",
-                    # Generate today's date
-                    "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                },
-                "response": None,
-                "status": "Error",
-            }
-            return jsonify(response)
+    """Given a list of { gameID, timestamp, isObtained }, update the user's collection with the obtained weapons."""
 
-        if user is None:
-            response = {
-                "meta": {
-                    "code": f"{401} Unauthorized",
-                    "status": "Please log in to use this feature.",
-                    # Generate today's date
-                    "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                },
-                "response": None,
-                "status": "Error",
-            }
-            return jsonify(response)
-
-        # Assign the userID & weaponIDs in Collections relation
-        user_id = client.terra.users.find_one({"username": user["username"]})["_id"]
-        weapon_ids = request.json.get("weapon_ids")
-
-        # Update the user's collection, add weapon ids to an id object id: { weapon_ids: [] }
-
-        data = {
-            "user_id": user_id,
-            "ids": {
-                "weapon_ids": [
-                    {"id": weapon_id, "dateObtained": dt.datetime.now()}
-                    for weapon_id in weapon_ids
-                ],
-            },
-            "dateSubmitted": dt.datetime.now(),
-        }
-
-        # Modify current user's collection if collection exists
-        if client.terra.collections.find_one({"user_id": user_id}):
-            client.terra.collections.update_one(
-                {"user_id": user_id},
-                {
-                    "$push": {
-                        "ids.weapon_ids": {
-                            "id": weapon_id,
-                            "dateObtained": dt.datetime.now(),
-                        }
-                    }
-                },
-            )
-        else:
-            client.terra.collections.insert_one(
-                {
-                    "user_id": user_id,
-                    "ids": {
-                        "weapon_ids": [
-                            {"id": weapon_id, "dateObtained": dt.datetime.now()}
-                            for weapon_id in weapon_ids
-                        ],
-                    },
-                    "dateSubmitted": dt.datetime.now(),
-                }
-            )
-
+    if request.json is None:
         response = {
             "meta": {
-                "code": f"{201} Created",
-                "status": "Successfully obtained weapons.",
+                "code": f"{400} Bad Request",
+                "status": "Please provide a payload of { gameID, timestamp, isObtained }.",
                 "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             },
-            "response": data,
-            "status": "Success",
+            "response": None,
+            "status": "Error",
         }
-        return jsonify(json.loads(json_util.dumps(response)))
+        return response
+
+    if user is None:
+        response = {
+            "meta": {
+                "code": f"{401} Unauthorized",
+                "status": "Please log in to use this feature.",
+                # Generate today's date
+                "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            },
+            "response": None,
+            "status": "Error",
+        }
+        return response
+
+    user_id = client.terra.users.find_one({"username": user["username"]})["_id"]
+
+    obtained_weapons = []
+    unobtained_weapons = []
+
+    for entry in request.json:
+        if entry["isObtained"] is True:
+            obtained_weapons.append(
+                {
+                    "gameId": entry["gameId"],
+                    "timestamp": dt.datetime.strptime(
+                        entry["timestamp"], "%m/%d/%y, %H:%M:%S:%f"
+                    ),
+                }
+            )
+        else:
+            unobtained_weapons.append(entry["gameId"])
+
+    # Remove all unobtained weapons from the user's collection
+    collection = client.terra.collections.find_one({"user_id": user_id})
+    if unobtained_weapons and collection:
+        client.terra.collections.update_one(
+            {"user_id": user_id},
+            {"$pull": {"ids.weapon_ids": {"gameId": {"$in": unobtained_weapons}}}},
+        )
+
+    # Update users' collections with obtained weapons & timestamp
+    if obtained_weapons and collection:
+        client.terra.collections.update_one(
+            {"user_id": user_id},
+            {
+                "$push": {
+                    "ids.weapon_ids": {
+                        "$each": [
+                            {
+                                "gameId": entry["gameId"],
+                                "dateObtained": entry["timestamp"],
+                            }
+                            for entry in obtained_weapons
+                        ]
+                    }
+                }
+            },
+        )
+    elif obtained_weapons and not collection:
+        client.terra.collections.insert_one(
+            {
+                "user_id": user_id,
+                "ids": {
+                    "weapon_ids": [
+                        {
+                            "gameId": entry["gameId"],
+                            "dateObtained": entry["timestamp"],
+                        }
+                        for entry in obtained_weapons
+                    ],
+                },
+                "dateSubmitted": dt.datetime.now(),
+            }
+        )
+
+    data = {
+        "user_id": user_id,
+        "ids": {
+            "weapon_ids": [
+                {
+                    "gameId": entry["gameId"],
+                    "dateObtained": entry["timestamp"],
+                    "isObtained": True,
+                }
+                for entry in obtained_weapons
+            ],
+        },
+        "dateSubmitted": dt.datetime.now(),
+    }
+
+    data["ids"]["weapon_ids"].extend(
+        [
+            {"gameId": weapon, "dateObtained": None, "isObtained": False}
+            for weapon in unobtained_weapons
+        ]
+    )
+
+    response = {
+        "meta": {
+            "code": f"{201} Created",
+            "status": "Successfully obtained weapons.",
+            "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        },
+        "response": data,
+        "status": "Success",
+    }
+    return json.loads(json_util.dumps(response))
+
+
+def get_collection(user):
+    """Get a user's collection in JSON.
+
+    Create a view (join) of the user's collection ("obtained IDs") & associated weapon data.
+    """
+
+    if user is None:
+        response = {
+            "meta": {
+                "code": f"{401} Unauthorized",
+                "status": "Please log in to use this feature.",
+                "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            },
+            "response": None,
+            "status": "Error",
+        }
+        return response
+
+    user_id = client.terra.users.find_one({"username": user["username"]})["_id"]
+
+    # Get the user's collection
+    collection = client.terra.collections.find_one({"user_id": user_id})
+
+    if collection is None:
+        response = {
+            "meta": {
+                "code": f"{404} Not Found",
+                "status": "No collection found for this user.",
+                # Generate today's date
+                "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            },
+            "response": None,
+            "status": "Error",
+        }
+        return response
+
+    # Map user's collection with weapon data
+    weapon_ids = [str(tup["gameId"]) for tup in collection["ids"]["weapon_ids"]]
+    weapons = client.terra.weapons.find({"gameId": {"$in": weapon_ids}})
+
+    data = []
+    for weapon in weapons:
+        for weapon_id in weapon_ids:
+            if weapon["gameId"] == weapon_id:
+                weapon["isObtained"] = True
+                data.append(weapon)
+                break
+
+    response = {
+        "meta": {
+            "code": f"{200} OK",
+            "status": "Successfully retrieved user's collection.",
+            "total": len(collection["ids"]["weapon_ids"]),
+            "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        },
+        "response": data,
+        "status": "Success",
+    }
+    return json.loads(json_util.dumps(response))
+
+
+# @dev-only
+def bulk_dump_obtain(user, request):
+
+    if request.json is None or request.json.get("weapon_ids") is None:
+        response = {
+            "meta": {
+                "code": f"{400} Bad Request",
+                "status": "Please provide a payload of IDs.",
+                # Generate today's date
+                "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            },
+            "response": None,
+            "status": "Error",
+        }
+        return jsonify(response)
+
+    if user is None:
+        response = {
+            "meta": {
+                "code": f"{401} Unauthorized",
+                "status": "Please log in to use this feature.",
+                # Generate today's date
+                "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            },
+            "response": None,
+            "status": "Error",
+        }
+        return jsonify(response)
+
+    user_id = client.terra.users.find_one({"username": user["username"]})["_id"]
+    weapon_ids = request.json.get("weapon_ids")
+    data = {
+        "user_id": user_id,
+        "ids": {
+            "weapon_ids": [
+                {"gameId": str(weapon), "dateObtained": dt.datetime.now()}
+                for weapon in weapon_ids
+            ],
+        },
+        "dateSubmitted": dt.datetime.now(),
+    }
+
+    # Update users' collections with obtained weapons and timestamp
+    if client.terra.collections.find_one({"user_id": user_id}):
+        client.terra.collections.update_one(
+            {"user_id": user_id},
+            {
+                "$push": {
+                    "ids.weapon_ids": {
+                        "$each": data["ids"]["weapon_ids"],
+                    }
+                }
+            },
+        )
+    else:
+        client.terra.collections.insert_one(data)
+
+    response = {
+        "meta": {
+            "code": f"{201} Created",
+            "status": "Successfully obtained weapons.",
+            "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        },
+        "response": data,
+        "status": "Success",
+    }
+    return json.loads(json_util.dumps(response))
+
+
+# @deprecated
+def get_weapon(weapon_name: str):
+    """Get a weapon in JSON by name."""
+    threshold = 82
+    try:
+        with open("db/weapons.json", "r") as file:
+            data = json.load(file)
+            result = None
+
+            # Use fuzzywuzzy on all the weapons to find the closest match
+            best_weapon_name, best_score = process.extractOne(
+                weapon_name, [entry["name"] for entry in data.values()]
+            )
+
+            if best_score < threshold:
+                raise KeyError(f"{weapon_name} not found in database.")
+
+            for _, entry in data.items():
+                if entry["name"] == best_weapon_name:
+                    result = entry
+
+            # Send a response
+            response = {
+                "meta": {
+                    "code": f"{200} OK",
+                    "status": f"Successfully retrieved {best_weapon_name}.",
+                    "fuzzyScore": best_score,
+                    "correctedName": best_weapon_name,
+                    "originalName": weapon_name,
+                    # Generate today's date
+                    "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                },
+                "response": result,
+                "status": "Success",
+            }
+
+            return jsonify(response)
 
     except FileNotFoundError:
         response = {
@@ -293,7 +531,7 @@ def obtain(user, request):
         response = {
             "meta": {
                 "code": f"{404} Not Found",
-                "status": "Failed to modify data.",
+                "status": f"{weapon_name} not found in database.",
                 # Generate today's date
                 "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             },
@@ -303,6 +541,7 @@ def obtain(user, request):
         return jsonify(response)
 
 
+# @deprecated
 def obtain_weapon(user, request):
     """Obtain weapon in JSON, return the weapon data."""
     try:
@@ -385,179 +624,6 @@ def obtain_weapon(user, request):
             "meta": {
                 "code": f"{404} Not Found",
                 "status": f"{weapon_name} not found in database.",
-                # Generate today's date
-                "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            },
-            "response": None,
-            "status": "Error",
-        }
-        return jsonify(response)
-
-
-def get_weapons(options: dict = {}):
-    """Get all weapons from MongoDB."""
-
-    # Check if options matches the schema
-    weapons = client.terra.weapons.find(options)
-    if weapons is None:
-        response = {
-            "meta": {
-                "code": f"{404} Not Found",
-                "status": "No weapons found in database. Ensure params are correct.",
-                # Generate today's date
-                "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            },
-            "response": None,
-            "status": "Error",
-        }
-        return jsonify(response)
-
-    response = {
-        "meta": {
-            "code": f"{200} OK",
-            "status": "Successfully retrieved all weapons.",
-            "total": client.terra.weapons.count_documents({}),
-            "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        },
-        "response": weapons,
-        "status": "Success",
-    }
-    return jsonify(json.loads(json_util.dumps(response)))
-
-
-def get_weapon(weapon_name: str):
-    """Get a weapon in JSON by name."""
-    threshold = 82
-    try:
-        with open("db/weapons.json", "r") as file:
-            data = json.load(file)
-            result = None
-
-            # Use fuzzywuzzy on all the weapons to find the closest match
-            best_weapon_name, best_score = process.extractOne(
-                weapon_name, [entry["name"] for entry in data.values()]
-            )
-
-            if best_score < threshold:
-                raise KeyError(f"{weapon_name} not found in database.")
-
-            for _, entry in data.items():
-                if entry["name"] == best_weapon_name:
-                    result = entry
-
-            # Send a response
-            response = {
-                "meta": {
-                    "code": f"{200} OK",
-                    "status": f"Successfully retrieved {best_weapon_name}.",
-                    "fuzzyScore": best_score,
-                    "correctedName": best_weapon_name,
-                    "originalName": weapon_name,
-                    # Generate today's date
-                    "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                },
-                "response": result,
-                "status": "Success",
-            }
-
-            return jsonify(response)
-
-    except FileNotFoundError:
-        response = {
-            "meta": {
-                "code": f"{500} Internal Server Error",
-            },
-            "response": None,
-            "status": "Error",
-        }
-        return jsonify(response)
-    except KeyError:
-        response = {
-            "meta": {
-                "code": f"{404} Not Found",
-                "status": f"{weapon_name} not found in database.",
-                # Generate today's date
-                "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            },
-            "response": None,
-            "status": "Error",
-        }
-        return jsonify(response)
-
-
-def get_collection(user):
-    """Get a user's collection in JSON."""
-    try:
-        if user is None:
-            response = {
-                "meta": {
-                    "code": f"{401} Unauthorized",
-                    "status": "Please log in to use this feature.",
-                    # Generate today's date
-                    "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                },
-                "response": None,
-                "status": "Error",
-            }
-            return jsonify(response)
-
-        # Assign the userID & weaponIDs in Collections relation
-        user_id = client.terra.users.find_one({"username": user["username"]})["_id"]
-
-        # Get the user's collection
-        collection = client.terra.collections.find_one({"user_id": user_id})
-        if collection is None:
-            response = {
-                "meta": {
-                    "code": f"{404} Not Found",
-                    "status": "No collection found for this user.",
-                    # Generate today's date
-                    "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                },
-                "response": None,
-                "status": "Error",
-            }
-            return jsonify(response)
-
-        # Map user's collection with weapon data
-        weapon_ids = [str(tup["id"]) for tup in collection["ids"]["weapon_ids"]]
-        weapons = client.terra.weapons.find({"gameId": {"$in": weapon_ids}})
-
-        data = []
-        # For each weapon, append dateObtained & isObtained to true
-        for weapon in weapons:
-            for weapon_id in weapon_ids:
-                if weapon["gameId"] == weapon_id:
-                    weapon["isObtained"] = True
-                    data.append(weapon)
-                    break
-
-        response = {
-            "meta": {
-                "code": f"{200} OK",
-                "status": "Successfully retrieved user's collection.",
-                "total": len(collection["ids"]["weapon_ids"]),
-                "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            },
-            "response": data,
-            "status": "Success",
-        }
-        return jsonify(json.loads(json_util.dumps(response)))
-
-    except FileNotFoundError:
-        response = {
-            "meta": {
-                "code": f"{500} Internal Server Error",
-            },
-            "response": None,
-            "status": "Error",
-        }
-        return jsonify(response)
-    except KeyError:
-        response = {
-            "meta": {
-                "code": f"{404} Not Found",
-                "status": "Failed to retrieve user's collection.",
                 # Generate today's date
                 "dateRetrieved": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             },
